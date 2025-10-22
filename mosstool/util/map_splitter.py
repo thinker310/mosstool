@@ -168,10 +168,10 @@ def split_map(
                     for poi_id in aoi["poi_ids"]:
                         poi = pois_dict[poi_id]
                         partial_map_data["pois"].append(poi)
-                # header
-                partial_map_data["header"] = _gen_header(
-                    map_name, poly_id, proj_str, partial_map_data["lanes"]
-                )
+            # header
+            partial_map_data["header"] = _gen_header(
+                map_name, poly_id, proj_str, partial_map_data["lanes"]
+            )
             output_map_pbs[poly_id] = dict2pb(partial_map_data, Map())
     if output_path is not None:
         for poly_id, pb in output_map_pbs.items():
