@@ -7,11 +7,6 @@ from typing import Any
 import shapely.ops as ops
 from shapely.affinity import scale
 from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon
-try:
-    from shapely.strtree import STRtree
-except Exception:
-    STRtree = None
-
 from tqdm import tqdm
 
 from ..const import *
@@ -357,87 +352,6 @@ def _process_stops(stops):
         stop["area"] = geo.area  # area
     return stops
 
-# --- Globals for POI->AOI matching (avoid pickling huge AOI list per task) ---
-_POI_MATCH_AOIS = None
-_POI_MATCH_TREE = None
-_POI_MATCH_ID2IDX = None
-
-def _init_poi_matcher(aois_to_match_poi):
-    """Initializer for multiprocessing workers (and also used for serial)."""
-    global _POI_MATCH_AOIS, _POI_MATCH_TREE, _POI_MATCH_ID2IDX
-    _POI_MATCH_AOIS = aois_to_match_poi
-    _POI_MATCH_TREE = STRtree([a["geo"] for a in aois_to_match_poi]) if STRtree is not None else None
-    # shapely 1.8 fallback: STRtree.query returns geometries, so we need id->index
-    _POI_MATCH_ID2IDX = {id(a["geo"]): i for i, a in enumerate(aois_to_match_poi)}
-
-def _tree_query_contains(pt: Point):
-    """Return AOI indices whose polygon covers the point."""
-    if _POI_MATCH_TREE is None:
-        return []
-    # shapely 2.x: supports predicate="contains"
-    try:
-        idxs = _POI_MATCH_TREE.query(pt, predicate="contains")
-        return [int(i) for i in idxs]
-    except TypeError:
-        # shapely 1.8: returns geometries
-        cand = _POI_MATCH_TREE.query(pt)
-        out = []
-        for g in cand:
-            try:
-                if pt.covered_by(g):
-                    out.append(_POI_MATCH_ID2IDX[id(g)])
-            except Exception:
-                pass
-        return out
-
-def _tree_query_neighbors(pt: Point, dis_gate: float):
-    """Return candidate AOI indices near the point (for projection distance check)."""
-    if _POI_MATCH_TREE is None:
-        return []
-    try:
-        idxs = _POI_MATCH_TREE.query(pt.buffer(dis_gate))
-        # shapely 2.x: might return indices; shapely 1.8 returns geometries
-        if len(idxs) > 0 and isinstance(idxs[0], (int, np.integer)):
-            return [int(i) for i in idxs]
-        return [_POI_MATCH_ID2IDX[id(g)] for g in idxs]
-    except Exception:
-        return []
-
-def _match_poi_unit_fast(poi: dict[str, Any]):
-    """
-    Match poi to the aoi that covers it; otherwise project to nearest aoi within DIS_GATE.
-    Uses STRtree to avoid scanning all AOIs.
-    """
-    aois_to_match_poi = _POI_MATCH_AOIS
-    x, y = poi["coords"][0]
-    pt = Point(x, y)
-    poi["point"] = pt
-
-    # isolated categories
-    for c in poi["external"]["catg"].split("|"):
-        if c in ISOLATED_POI_CATG:
-            return (poi, THIS_IS_ISOLATE_POI)
-
-    # 1) covered_by
-    covered_idxs = _tree_query_contains(pt)
-    if covered_idxs:
-        # preserve original "first found" spirit: use smallest index
-        parent = min(covered_idxs)
-        return (poi, parent, THIS_IS_COVERED_POI)
-
-    # 2) projection to nearest within DIS_GATE
-    neighbor_idxs = _tree_query_neighbors(pt, DIS_GATE)
-    best = None  # (idx, distance)
-    for i in neighbor_idxs:
-        aoi = aois_to_match_poi[i]
-        dis = pt.distance(aoi["geo"])
-        if dis < DIS_GATE:
-            if best is None or dis < best[1]:
-                best = (i, dis)
-
-    if best is not None:
-        return (poi, best[0], THIS_IS_PROJECTED_POI)
-    return (poi, THIS_IS_ISOLATE_POI)
 
 def _match_poi_to_aoi(
     aois: list[dict[str, Any]],
@@ -448,43 +362,39 @@ def _match_poi_to_aoi(
 ):
     """
     poi matches aoi:
-    - If covered by existing aoi -> belong to that aoi
-    - Else project to nearest aoi within DIS_GATE
-    - Else become isolated (later turned into independent aoi)
+    Directly dependent items covered by existing aoi go in
+    Those that are not covered, such as bus stations, become new aoi; non-bus stations are subordinate to the nearest aoi within a certain distance; those that are too far away from the existing aoi become new aoi
     """
-    workers = max(int(workers or 1), 1)
-    logging.info(f"Matching poi({len(pois)}) to aoi({len(aois)}) with workers={workers}")
-
-    # build matcher for serial path (also used by multiprocessing initializer)
-    _init_poi_matcher(aois)
-
-    # chunksize
-    chunksize = max(min(ceil(len(pois) / workers), max_chunk_size), 1)
-
-    # IMPORTANT: if workers<=1, do NOT create Pool (avoid fork/pickling huge AOIs)
-    if workers <= 1:
-        it = pois
-        if enable_tqdm:
-            it = tqdm(pois, total=len(pois))
-        results = [_match_poi_unit_fast(p) for p in it]
-    else:
-        # Single pool for the whole matching (avoid recreating pool per batch)
-        with Pool(processes=workers, initializer=_init_poi_matcher, initargs=(aois,)) as pool:
-            it = pool.imap(_match_poi_unit_fast, pois, chunksize=chunksize)
-            if enable_tqdm:
-                it = tqdm(it, total=len(pois))
-            results = list(it)
-
+    # Calculate whether each poi is covered. If not, calculate the projection onto the nearest aoi.
+    logging.info(f"Multiprocessing for matching poi({len(pois)}) to aoi({len(aois)})")
+    results = []
+    aois_to_match_poi = aois
+    partial_match_poi_unit = partial(_match_poi_unit, (aois_to_match_poi,))
+    for i in tqdm(range(0, len(pois), MAX_BATCH_SIZE), disable=not enable_tqdm):
+        pois_batch = pois[i : i + MAX_BATCH_SIZE]
+        with Pool(processes=workers) as pool:
+            results += pool.map(
+                partial_match_poi_unit,
+                pois_batch,
+                chunksize=max(
+                    min(ceil(len(pois_batch) / workers), max_chunk_size),
+                    1,
+                ),
+            )
+    pois_covered = []
+    pois_projected = []
     pois_isolate = []
     pid2catg = {p["id"]: p["external"]["catg"] for p in pois}
     for x in results:
         if x[-1] == THIS_IS_COVERED_POI:
             poi, aoi_idx = x[:2]
+            pois_covered.append(poi)
             aoi = aois[aoi_idx]
             aoi["external"]["inner_poi"].append(poi["id"])
             aoi["external"]["inner_poi_catg"].append(pid2catg[poi["id"]])
         elif x[-1] == THIS_IS_PROJECTED_POI:
             poi, aoi_idx = x[:2]
+            pois_projected.append(poi)
             aoi = aois[aoi_idx]
             aoi["external"]["inner_poi"].append(poi["id"])
             aoi["external"]["inner_poi_catg"].append(pid2catg[poi["id"]])
@@ -492,7 +402,6 @@ def _match_poi_to_aoi(
             pois_isolate.append(x[0])
 
     return aois, pois_isolate, pois
-
 
 
 def _post_compute_aoi_poi(aois, pois_isolate):

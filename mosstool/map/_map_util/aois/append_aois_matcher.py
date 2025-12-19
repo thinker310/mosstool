@@ -259,18 +259,21 @@ def _merge_point_aoi(
             partial_split_merged_poi_unit = partial(
                 _split_merged_poi_unit, (road_lane_matcher,)
             )
-            with Pool(processes=workers) as pool:
-                post_res = pool.map(
-                    partial_split_merged_poi_unit,
-                    list(merged_poi.values()),
-                    chunksize=max(
-                        min(
-                            ceil(len(list(merged_poi.values())) / workers),
-                            max_chunk_size,
+            if workers <= 1:
+                post_res = list(map(partial_split_merged_poi_unit, list(merged_poi.values())))
+            else:
+                with Pool(processes=workers) as pool:
+                    post_res = pool.map(
+                        partial_split_merged_poi_unit,
+                        list(merged_poi.values()),
+                        chunksize=max(
+                            min(
+                                ceil(len(list(merged_poi.values())) / workers),
+                                max_chunk_size,
+                            ),
+                            1,
                         ),
-                        1,
-                    ),
-                )
+                    )
             for res_aoi, res_poi in post_res:
                 res_poly += res_aoi
                 res_point += res_poi
@@ -1547,12 +1550,15 @@ def _merge_covered_aoi(
         partial_find_aoi_parent_unit = partial(_find_aoi_parent_unit, (aois_to_merge,))
         for i in range(0, len(_aois), MAX_BATCH_SIZE):
             aois_batch = _aois[i : i + MAX_BATCH_SIZE]
-            with Pool(processes=workers) as pool:
-                aois_result += pool.map(
-                    partial_find_aoi_parent_unit,
-                    aois_batch,
-                    chunksize=min(ceil(len(aois_batch) / workers), max_chunk_size),
-                )
+            if workers <= 1:
+                aois_result += list(map(partial_find_aoi_parent_unit, aois_batch))
+            else:
+                with Pool(processes=workers) as pool:
+                    aois_result += pool.map(
+                        partial_find_aoi_parent_unit,
+                        aois_batch,
+                        chunksize=min(ceil(len(aois_batch) / workers), max_chunk_size),
+                    )
     aois = sorted(aois_result, key=lambda aoi: aoi["idx"])
     parent2children = defaultdict(list)
     child2parent = {}
@@ -1592,15 +1598,18 @@ def _merge_covered_aoi(
         partial_find_aoi_overlap_unit = partial(_find_aoi_overlap_unit, partial_args)
         for i in range(0, len(_aois), MAX_BATCH_SIZE):
             aois_batch = _aois[i : i + MAX_BATCH_SIZE]
-            with Pool(processes=workers) as pool:
-                aois_result += pool.map(
-                    partial_find_aoi_overlap_unit,
-                    aois_batch,
-                    chunksize=max(
-                        min(ceil(len(aois_batch) / workers), max_chunk_size),
-                        1,
-                    ),
-                )
+            if workers <= 1:
+                aois_result += list(map(partial_find_aoi_overlap_unit, aois_batch))
+            else:
+                with Pool(processes=workers) as pool:
+                    aois_result += pool.map(
+                        partial_find_aoi_overlap_unit,
+                        aois_batch,
+                        chunksize=max(
+                            min(ceil(len(aois_batch) / workers), max_chunk_size),
+                            1,
+                        ),
+                    )
     aois = aois_result
     # get difference set of larger aoi
     has_overlap_aids = defaultdict(list)
@@ -1771,12 +1780,15 @@ def _add_aoi(
     partial_add_aoi_stop_unit = partial(_add_aoi_stop_unit, partial_args)
     for i in tqdm(range(0, len(args), MAX_BATCH_SIZE), disable=not enable_tqdm):
         args_batch = args[i : i + MAX_BATCH_SIZE]
-        with Pool(processes=workers) as pool:
-            results_stop += pool.map(
-                partial_add_aoi_stop_unit,
-                args_batch,
-                chunksize=min(ceil(len(args_batch) / workers), max_chunk_size),
-            )
+        if workers <= 1:
+            results_stop += list(map(partial_add_aoi_stop_unit, args_batch))
+        else:
+            with Pool(processes=workers) as pool:
+                results_stop += pool.map(
+                    partial_add_aoi_stop_unit,
+                    args_batch,
+                    chunksize=min(ceil(len(args_batch) / workers), max_chunk_size),
+                )
     results_stop = [r for r in results_stop if r]
     logging.info(f"matched aois_stop: {len(results_stop)}")
     results_poly = []
@@ -1794,12 +1806,15 @@ def _add_aoi(
     partial_add_poly_aoi_unit = partial(_add_poly_aoi_unit, partial_args)
     for i in tqdm(range(0, len(args), MAX_BATCH_SIZE), disable=not enable_tqdm):
         args_batch = args[i : i + MAX_BATCH_SIZE]
-        with Pool(processes=workers) as pool:
-            results_poly += pool.map(
-                partial_add_poly_aoi_unit,
-                args_batch,
-                chunksize=min(ceil(len(args_batch) / workers), max_chunk_size),
-            )
+        if workers <= 1:
+            results_poly += list(map(partial_add_poly_aoi_unit, args_batch))
+        else:
+            with Pool(processes=workers) as pool:
+                results_poly += pool.map(
+                    partial_add_poly_aoi_unit,
+                    args_batch,
+                    chunksize=min(ceil(len(args_batch) / workers), max_chunk_size),
+                )
     results_poly = [r for r in results_poly if r]
     logging.info(f"matched aois_poly: {len(results_poly)}")
 
