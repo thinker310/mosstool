@@ -13,7 +13,7 @@ from shapely.geometry import LineString
 
 __all__ = ["RouteConverter"]
 
-
+DEFAULT_HEADWAY = 1.5
 class RouteConverter:
     def __init__(
         self,
@@ -440,18 +440,7 @@ class RouteConverter:
                     "loop_count": 1,
                 }
             ]
-            self._output_agents.append(
-                {
-                    "id": self.agent_uid,
-                    "home": flow_home,
-                    "attribute": self.agent_attribute,
-                    "vehicle_attribute": self.vehicle_attribute,
-                    "pedestrian_attribute": self.pedestrian_attribute,
-                    "bike_attribute": self.bike_attribute,
-                    "schedules": schedules,
-                }
-            )
-            self.agent_uid += 1
+            self._append_agent(flow_home, schedules)
 
     def _convert_stops(
         self,
@@ -642,18 +631,7 @@ class RouteConverter:
             departure,
             trip_type,
         )
-        self._output_agents.append(
-            {
-                "id": self.agent_uid,
-                "home": veh_home,
-                "attribute": self.agent_attribute,
-                "vehicle_attribute": self.vehicle_attribute,
-                "pedestrian_attribute": self.pedestrian_attribute,
-                "bike_attribute": self.bike_attribute,
-                "schedules": schedules,
-            }
-        )
-        self.agent_uid += 1
+        self._append_agent(veh_home, schedules)
 
     def convert_route(self):
         self.agent_uid = 0
@@ -672,7 +650,7 @@ class RouteConverter:
         DEFAULT_PEDESTRIAN_ATTRIBUTE = {"speed": 1.34}
         DEFAULT_BIKE_ATTRIBUTE = {"speed": 5}
         DEFAULT_AGENT_TYPE = "AGENT_TYPE_PRIVATE_CAR"
-
+        
         # Route contains the edges that all vehicles pass through, that is, the complete trajectory
         # Route can be defined separately from vehicle or under vehicle, so additional judgment is required.
         self.route_dict = {}
@@ -691,6 +669,7 @@ class RouteConverter:
                     self.bike_attribute,
                     self.agent_type,
                 ) = self._vtype[trip_type]
+                
             else:
                 (
                     self.agent_attribute,
@@ -829,18 +808,7 @@ class RouteConverter:
                     )
                     departure += eta
                     pre_via_end = via_end
-                self._output_agents.append(
-                    {
-                        "id": self.agent_uid,
-                        "home": trip_home,
-                        "attribute": self.agent_attribute,
-                        "vehicle_attribute": self.vehicle_attribute,
-                        "pedestrian_attribute": self.pedestrian_attribute,
-                        "bike_attribute": self.bike_attribute,
-                        "schedules": schedules,
-                    }
-                )
-                self.agent_uid += 1
+                self._append_agent(trip_home, schedules)
 
         def get_flow_departure_times(
             f: minidom.Element, begin_time: np.float64, end_time: np.float64
@@ -1033,3 +1001,42 @@ class RouteConverter:
             )
 
         return {"persons": self._output_agents}
+
+    # def _get_headway(self) -> float:
+    #     # 1) 拷贝，避免不同 agent 共享同一个 dict 引发串扰
+    #     va_src = getattr(self, "vehicle_attribute", None)
+    #     va = dict(va_src) if isinstance(va_src, dict) else {}
+
+    #     # 2) 兜底 headway（必须 > 0）
+    #     hw = float(va.get("headway", 0.0) or 0.0)
+    #     if hw <= 0:
+    #         # 如果你未来想支持 tau，可放开；当前你的 vehicle_attribute 里没 tau 字段也没关系
+    #         tau = float(va.get("tau", 0.0) or 0.0)
+    #         hw = tau if tau > 0 else DEFAULT_HEADWAY
+    #     return hw
+
+    def _append_agent(self, home: dict, schedules: list):
+        # 1) 拷贝，避免不同 agent 共享同一个 dict 引发串扰
+        va_src = getattr(self, "vehicle_attribute", None)
+        va = dict(va_src) if isinstance(va_src, dict) else {}
+
+        # 2) 兜底 headway（必须 > 0）
+        hw = float(va.get("headway", 0.0) or 0.0)
+        if hw <= 0:
+            # 如果你未来想支持 tau，可放开；当前你的 vehicle_attribute 里没 tau 字段也没关系
+            tau = float(va.get("tau", 0.0) or 0.0)
+            hw = tau if tau > 0 else DEFAULT_HEADWAY
+        va["headway"] = hw
+        self._output_agents.append(
+            {
+                "id": self.agent_uid,
+                "home": home,
+                "attribute": self.agent_attribute,
+                "vehicle_attribute": va,
+                "pedestrian_attribute": self.pedestrian_attribute,
+                "bike_attribute": self.bike_attribute,
+                "schedules": schedules,
+            }
+        )
+        self.agent_uid += 1
+
